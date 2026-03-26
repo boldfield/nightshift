@@ -84,6 +84,8 @@ Flags:
                      Ignored when --task is set.
   --random-task      Pick a random task from eligible tasks (exactly 1).
                      Mutually exclusive with --task.
+  --timeout DURATION Per-phase agent timeout (default 30m).
+                     Overrides providers.{name}.agent_timeout from config.
   --ignore-budget    Bypass budget checks (use with caution).
   --yes / -y         Skip the confirmation prompt.
   --dry-run          Show preflight summary and exit without executing.
@@ -129,6 +131,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	yes, _ := cmd.Flags().GetBool("yes")
 	randomTask, _ := cmd.Flags().GetBool("random-task")
 	agentTimeout, _ := cmd.Flags().GetDuration("timeout")
+	agentTimeoutChanged := cmd.Flags().Changed("timeout")
 
 	branch, _ := cmd.Flags().GetString("branch")
 
@@ -240,21 +243,22 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	params := executeRunParams{
-		cfg:          cfg,
-		budgetMgr:    budgetMgr,
-		selector:     selector,
-		st:           st,
-		projects:     projects,
-		taskFilter:   taskFilter,
-		maxProjects:  maxProjects,
-		maxTasks:     maxTasks,
-		randomTask:   randomTask,
-		ignoreBudget: ignoreBudget,
-		dryRun:       dryRun,
-		yes:          yes,
-		branch:       branch,
-		agentTimeout: agentTimeout,
-		log:          log,
+		cfg:                 cfg,
+		budgetMgr:           budgetMgr,
+		selector:            selector,
+		st:                  st,
+		projects:            projects,
+		taskFilter:          taskFilter,
+		maxProjects:         maxProjects,
+		maxTasks:            maxTasks,
+		randomTask:          randomTask,
+		ignoreBudget:        ignoreBudget,
+		dryRun:              dryRun,
+		yes:                 yes,
+		branch:              branch,
+		agentTimeout:        agentTimeout,
+		agentTimeoutChanged: agentTimeoutChanged,
+		log:                 log,
 	}
 	if !dryRun {
 		params.report = newRunReport(time.Now(), calculateRunBudgetStart(cfg, budgetMgr, log))
@@ -263,22 +267,23 @@ func runRun(cmd *cobra.Command, args []string) error {
 }
 
 type executeRunParams struct {
-	cfg          *config.Config
-	budgetMgr    *budget.Manager
-	selector     *tasks.Selector
-	st           *state.State
-	projects     []string
-	taskFilter   string
-	maxProjects  int
-	maxTasks     int
-	randomTask   bool
-	ignoreBudget bool
-	dryRun       bool
-	yes          bool
-	branch       string
-	agentTimeout time.Duration
-	report       *runReport
-	log          *logging.Logger
+	cfg                 *config.Config
+	budgetMgr           *budget.Manager
+	selector            *tasks.Selector
+	st                  *state.State
+	projects            []string
+	taskFilter          string
+	maxProjects         int
+	maxTasks            int
+	randomTask          bool
+	ignoreBudget        bool
+	dryRun              bool
+	yes                 bool
+	branch              string
+	agentTimeout        time.Duration
+	agentTimeoutChanged bool // true when --timeout was explicitly set on CLI
+	report              *runReport
+	log                 *logging.Logger
 }
 
 // providerChoice holds a selected provider's agent and name.
@@ -413,10 +418,11 @@ func providerPreference(cfg *config.Config) []string {
 
 // preflightProject holds the planned tasks for a single project.
 type preflightProject struct {
-	path       string
-	tasks      []tasks.ScoredTask
-	provider   *providerChoice
-	skipReason string // non-empty if project was skipped
+	path         string
+	tasks        []tasks.ScoredTask
+	provider     *providerChoice
+	skipReason   string        // non-empty if project was skipped
+	agentTimeout time.Duration // resolved per-phase timeout
 }
 
 // preflightPlan collects all planned work before execution.
@@ -462,6 +468,15 @@ func buildPreflight(p executeRunParams) (*preflightPlan, error) {
 			break
 		}
 
+		// Resolve per-phase timeout: CLI flag > config file > default
+		resolvedTimeout := orchestrator.DefaultAgentTimeout
+		if configTimeout := p.cfg.GetProviderTimeout(choice.name); configTimeout > 0 {
+			resolvedTimeout = configTimeout
+		}
+		if p.agentTimeoutChanged {
+			resolvedTimeout = p.agentTimeout
+		}
+
 		// Select tasks
 		var selectedTasks []tasks.ScoredTask
 
@@ -496,9 +511,10 @@ func buildPreflight(p executeRunParams) (*preflightPlan, error) {
 		}
 
 		pp := preflightProject{
-			path:     projectPath,
-			tasks:    selectedTasks,
-			provider: choice,
+			path:         projectPath,
+			tasks:        selectedTasks,
+			provider:     choice,
+			agentTimeout: resolvedTimeout,
 		}
 
 		if len(selectedTasks) == 0 {
@@ -539,6 +555,14 @@ func displayPreflight(w io.Writer, plan *preflightPlan) {
 			_, _ = fmt.Fprintf(w, "Provider: %s (%.1f%% budget used, %s mode)\n",
 				pp.provider.name, pp.provider.allowance.UsedPercent, pp.provider.allowance.Mode)
 			_, _ = fmt.Fprintf(w, "Budget: %d tokens remaining\n", pp.provider.allowance.Allowance)
+			break
+		}
+	}
+
+	// Show timeout info from first project that has one
+	for _, pp := range plan.projects {
+		if pp.agentTimeout > 0 {
+			_, _ = fmt.Fprintf(w, "Timeout: %s per phase\n", pp.agentTimeout)
 			break
 		}
 	}
@@ -687,7 +711,7 @@ func executeRun(ctx context.Context, p executeRunParams) error {
 			orchestrator.WithAgent(choice.agent),
 			orchestrator.WithConfig(orchestrator.Config{
 				MaxIterations: 3,
-				AgentTimeout:  p.agentTimeout,
+				AgentTimeout:  pp.agentTimeout,
 			}),
 			orchestrator.WithLogger(logging.Component("orchestrator")),
 		}

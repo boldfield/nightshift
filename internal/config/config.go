@@ -70,8 +70,9 @@ type ProvidersConfig struct {
 
 // ProviderConfig defines settings for a single AI provider.
 type ProviderConfig struct {
-	Enabled  bool   `mapstructure:"enabled"`
-	DataPath string `mapstructure:"data_path"` // Path to provider data directory
+	Enabled      bool   `mapstructure:"enabled"`
+	DataPath     string `mapstructure:"data_path"`     // Path to provider data directory
+	AgentTimeout string `mapstructure:"agent_timeout"` // Per-phase timeout duration string (e.g. "60m")
 	// DangerouslySkipPermissions tells the CLI to skip interactive permission prompts.
 	DangerouslySkipPermissions bool `mapstructure:"dangerously_skip_permissions"`
 	// DangerouslyBypassApprovalsAndSandbox tells the CLI to bypass approvals and sandboxing.
@@ -421,6 +422,19 @@ func Validate(cfg *Config) error {
 		}
 	}
 
+	// Provider agent_timeout validation
+	for _, entry := range []struct{ name, val string }{
+		{"claude", cfg.Providers.Claude.AgentTimeout},
+		{"codex", cfg.Providers.Codex.AgentTimeout},
+		{"copilot", cfg.Providers.Copilot.AgentTimeout},
+	} {
+		if entry.val != "" {
+			if _, err := time.ParseDuration(entry.val); err != nil {
+				return fmt.Errorf("providers.%s.agent_timeout: invalid duration %q: %w", entry.name, entry.val, err)
+			}
+		}
+	}
+
 	// Custom task validation
 	if err := validateCustomTasks(cfg.Tasks.Custom); err != nil {
 		return err
@@ -529,6 +543,28 @@ func (c *Config) GetTaskInterval(taskType string) time.Duration {
 		}
 	}
 	return 0
+}
+
+// GetProviderTimeout returns the configured agent timeout for a provider.
+// Returns 0 if not set (caller should fall back to default).
+func (c *Config) GetProviderTimeout(provider string) time.Duration {
+	var raw string
+	switch provider {
+	case "claude":
+		raw = c.Providers.Claude.AgentTimeout
+	case "codex":
+		raw = c.Providers.Codex.AgentTimeout
+	case "copilot":
+		raw = c.Providers.Copilot.AgentTimeout
+	}
+	if raw == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 // GetTaskPriority returns the priority for a task (higher = more important).

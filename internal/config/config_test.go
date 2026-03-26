@@ -443,6 +443,91 @@ func TestLoadFromPaths_Defaults(t *testing.T) {
 	}
 }
 
+func TestGetProviderTimeout_Set(t *testing.T) {
+	cfg := &Config{
+		Providers: ProvidersConfig{
+			Claude: ProviderConfig{AgentTimeout: "60m"},
+			Codex:  ProviderConfig{AgentTimeout: "45m"},
+		},
+	}
+	if got := cfg.GetProviderTimeout("claude"); got != 60*time.Minute {
+		t.Errorf("GetProviderTimeout(claude) = %v, want 60m", got)
+	}
+	if got := cfg.GetProviderTimeout("codex"); got != 45*time.Minute {
+		t.Errorf("GetProviderTimeout(codex) = %v, want 45m", got)
+	}
+}
+
+func TestGetProviderTimeout_NotSet(t *testing.T) {
+	cfg := &Config{}
+	if got := cfg.GetProviderTimeout("claude"); got != 0 {
+		t.Errorf("GetProviderTimeout(claude) = %v, want 0", got)
+	}
+}
+
+func TestGetProviderTimeout_Invalid(t *testing.T) {
+	cfg := &Config{
+		Providers: ProvidersConfig{
+			Claude: ProviderConfig{AgentTimeout: "not-a-duration"},
+		},
+	}
+	if got := cfg.GetProviderTimeout("claude"); got != 0 {
+		t.Errorf("GetProviderTimeout(claude) = %v, want 0 for invalid duration", got)
+	}
+}
+
+func TestValidate_InvalidAgentTimeout(t *testing.T) {
+	cfg := &Config{
+		Providers: ProvidersConfig{
+			Claude: ProviderConfig{AgentTimeout: "not-a-duration"},
+		},
+	}
+	err := Validate(cfg)
+	if err == nil {
+		t.Fatal("expected error for invalid agent_timeout, got nil")
+	}
+	if !strings.Contains(err.Error(), "providers.claude.agent_timeout") {
+		t.Errorf("error should mention providers.claude.agent_timeout, got: %v", err)
+	}
+}
+
+func TestValidate_ValidAgentTimeout(t *testing.T) {
+	cfg := &Config{
+		Providers: ProvidersConfig{
+			Claude: ProviderConfig{AgentTimeout: "45m"},
+			Codex:  ProviderConfig{AgentTimeout: "1h30m"},
+		},
+	}
+	if err := Validate(cfg); err != nil {
+		t.Errorf("expected nil for valid agent_timeout, got %v", err)
+	}
+}
+
+func TestLoadFromPaths_AgentTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "nightshift.yaml")
+	configContent := `
+providers:
+  claude:
+    agent_timeout: "1h"
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadFromPaths(tmpDir, filepath.Join(tmpDir, "nonexistent", "global.yaml"))
+	if err != nil {
+		t.Fatalf("LoadFromPaths error: %v", err)
+	}
+
+	if cfg.Providers.Claude.AgentTimeout != "1h" {
+		t.Errorf("Providers.Claude.AgentTimeout = %q, want %q", cfg.Providers.Claude.AgentTimeout, "1h")
+	}
+	if got := cfg.GetProviderTimeout("claude"); got != time.Hour {
+		t.Errorf("GetProviderTimeout(claude) = %v, want 1h", got)
+	}
+}
+
 func TestValidate_CustomTaskValid(t *testing.T) {
 	cfg := &Config{
 		Tasks: TasksConfig{

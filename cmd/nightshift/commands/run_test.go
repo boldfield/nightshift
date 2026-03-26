@@ -14,6 +14,7 @@ import (
 	"github.com/marcus/nightshift/internal/config"
 	"github.com/marcus/nightshift/internal/db"
 	"github.com/marcus/nightshift/internal/logging"
+	"github.com/marcus/nightshift/internal/orchestrator"
 	"github.com/marcus/nightshift/internal/state"
 	"github.com/marcus/nightshift/internal/tasks"
 )
@@ -1305,5 +1306,143 @@ func TestScheduleMaxProjectsCLIOverridesConfig(t *testing.T) {
 
 	if maxProjects != 2 {
 		t.Fatalf("maxProjects = %d, want 2 (CLI should win over config)", maxProjects)
+	}
+}
+
+// --- Timeout precedence tests ---
+
+func TestTimeoutPrecedence_CLIOverridesConfig(t *testing.T) {
+	project := t.TempDir()
+	params := newPreflightParams(t, []string{project})
+	params.cfg.Providers.Claude.AgentTimeout = "60m"
+	params.agentTimeout = 45 * time.Minute
+	params.agentTimeoutChanged = true
+
+	plan, err := buildPreflight(params)
+	if err != nil {
+		t.Fatalf("buildPreflight: %v", err)
+	}
+	for _, pp := range plan.projects {
+		if pp.agentTimeout > 0 {
+			if pp.agentTimeout != 45*time.Minute {
+				t.Fatalf("agentTimeout = %v, want 45m (CLI should override config)", pp.agentTimeout)
+			}
+			return
+		}
+	}
+	t.Fatal("no project with agentTimeout found")
+}
+
+func TestTimeoutPrecedence_ConfigOverridesDefault(t *testing.T) {
+	project := t.TempDir()
+	params := newPreflightParams(t, []string{project})
+	params.cfg.Providers.Claude.AgentTimeout = "60m"
+	params.agentTimeoutChanged = false
+
+	plan, err := buildPreflight(params)
+	if err != nil {
+		t.Fatalf("buildPreflight: %v", err)
+	}
+	for _, pp := range plan.projects {
+		if pp.agentTimeout > 0 {
+			if pp.agentTimeout != 60*time.Minute {
+				t.Fatalf("agentTimeout = %v, want 60m (config should override default)", pp.agentTimeout)
+			}
+			return
+		}
+	}
+	t.Fatal("no project with agentTimeout found")
+}
+
+func TestTimeoutPrecedence_DefaultWhenNoneSet(t *testing.T) {
+	project := t.TempDir()
+	params := newPreflightParams(t, []string{project})
+	params.agentTimeoutChanged = false
+	// No config timeout set (empty string)
+
+	plan, err := buildPreflight(params)
+	if err != nil {
+		t.Fatalf("buildPreflight: %v", err)
+	}
+	for _, pp := range plan.projects {
+		if pp.agentTimeout > 0 {
+			if pp.agentTimeout != orchestrator.DefaultAgentTimeout {
+				t.Fatalf("agentTimeout = %v, want %v (default)", pp.agentTimeout, orchestrator.DefaultAgentTimeout)
+			}
+			return
+		}
+	}
+	t.Fatal("no project with agentTimeout found")
+}
+
+func TestDisplayPreflight_ShowsTimeout(t *testing.T) {
+	plan := &preflightPlan{
+		projects: []preflightProject{
+			{
+				path:         "/home/user/proj",
+				agentTimeout: 45 * time.Minute,
+				tasks: []tasks.ScoredTask{
+					{
+						Definition: tasks.TaskDefinition{
+							Name:     "Linter Fixes",
+							CostTier: tasks.CostLow,
+						},
+						Score: 5.0,
+					},
+				},
+				provider: &providerChoice{
+					name: "claude",
+					allowance: &budget.AllowanceResult{
+						Allowance:   50000,
+						UsedPercent: 20.0,
+						Mode:        "daily",
+					},
+				},
+			},
+		},
+	}
+
+	var buf strings.Builder
+	displayPreflight(&buf, plan)
+	output := buf.String()
+
+	if !strings.Contains(output, "Timeout: 45m0s per phase") {
+		t.Errorf("output missing 'Timeout: 45m0s per phase'\nGot:\n%s", output)
+	}
+}
+
+func TestDisplayPreflight_NoTimeoutWhenZero(t *testing.T) {
+	plan := &preflightPlan{
+		projects: []preflightProject{
+			{
+				path:         "/home/user/proj",
+				agentTimeout: 0,
+				tasks: []tasks.ScoredTask{
+					{
+						Definition: tasks.TaskDefinition{
+							Name:     "Test Task",
+							CostTier: tasks.CostLow,
+						},
+						Score: 5.0,
+					},
+				},
+				provider: &providerChoice{
+					name: "claude",
+					allowance: &budget.AllowanceResult{
+						Allowance:   50000,
+						UsedPercent: 20.0,
+						Mode:        "daily",
+					},
+				},
+			},
+		},
+	}
+
+	var buf strings.Builder
+	displayPreflight(&buf, plan)
+	output := buf.String()
+
+	if strings.Contains(output, "Timeout:") {
+		t.Errorf("output should not contain 'Timeout:' when agentTimeout is 0\nGot:\n%s", output)
 	}
 }

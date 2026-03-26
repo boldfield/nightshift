@@ -228,6 +228,16 @@ func displayPreflightColored(plan *preflightPlan) {
 		}
 	}
 
+	// Show timeout info from first project that has one
+	for _, pp := range plan.projects {
+		if pp.agentTimeout > 0 {
+			fmt.Printf("  %s %s\n",
+				s.Label.Render("Timeout:"),
+				s.Value.Render(fmt.Sprintf("%s per phase", pp.agentTimeout)))
+			break
+		}
+	}
+
 	// Count active projects (those with tasks)
 	active := 0
 	for _, pp := range plan.projects {
